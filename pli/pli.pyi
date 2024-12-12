@@ -155,9 +155,8 @@ def criar_grafo_rede(diplomatas, postos, alocacoes):
     plt.title("Grafo de Alocação", fontsize=12)
     plt.show()
 
-
-    # Exemplo de uso
-caminho_json = "/Users/andersoncaxeta/IdeaProjects/AEDI/db/postos.json"
+caminho_json = "resources/postos.json"
+# caminho_json = "Users/andersoncaxeta/IdeaProjects/AEDI/resources/postos.json"
 num_diplomatas = 350
 
 resultados, custo_total, tempo_execucao, diplomatas, postos, alocacoes = executar_pli(caminho_json, num_diplomatas)
