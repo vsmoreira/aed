@@ -1,178 +1,322 @@
-import pulp as pl
 import pandas as pd
-import json
+import numpy as np
+from scipy.optimize import linear_sum_assignment
+import pulp as pl
 import time
-import matplotlib.pyplot as plt
-import networkx as nx
-
-from hungaro.hungaro import gerar_base_diplomatas
-
-def carregar_postos(caminho_json):
-    with open(caminho_json, "r", encoding="utf-8") as file:
-        dados_postos = json.load(file)
-    df_postos = pd.DataFrame(dados_postos)
-    df_postos.rename(columns={
-        "coUnidadeAdministrativa": "posto",
-        "tpClassePosto": "classificacao",
-        "coTipoPosto": "tipo"
-    }, inplace=True)
-    return df_postos
-
-def get_posto_trabalho(id, postos):
-    resultado = postos.loc[postos['posto'] == id].to_dict(orient='records')
-    if resultado:
-        return resultado[0]
-    else:
-        return None
-
-# Valores constantes para maior clareza e manutenção
-CUSTO_INFINITO = 999999999.99
-TEMPO_MAXIMO_FORA = 144
-TEMPO_MINIMO_PEDAGIO = 24
-TEMPO_MINIMO_LOTACAO = 24
 
 
-def calcular_custo_aresta(diplomata, posto, postos):
-    def classificacao_para_custo(classificacao):
-        custos = {'A': 0.0, 'B': 10.0, 'C': 100.0, 'D': 1000.0}
-        return custos.get(classificacao, CUSTO_INFINITO)
+# Gerador de diplomatas e postos baseado na nova lógica
+def gerar_base_diplomatas(qtd_diplomatas, qtd_postos):
+    ids = []
+    pedagios = []
+    lotacoes = []
+    tempos_servico = []
+    tempos_lotacao = []
+    tempos_fora = []
 
-    if diplomata.tempo_fora >= TEMPO_MAXIMO_FORA:
-        return 0.0 if posto.classificacao == '*' else CUSTO_INFINITO
+    for p in range(qtd_diplomatas):
+        if len(lotacoes) < qtd_postos:
+            while True:
+                lotacao = 'P' + str(np.random.randint(1, qtd_postos + 1))
+                if lotacao == 'P0' or lotacao not in lotacoes:
+                    break
+        else:
+            lotacao = 'P0'
 
-    if diplomata.tempo_na_lotacao >= TEMPO_MINIMO_LOTACAO and diplomata.lotacao == posto.posto:
-        return CUSTO_INFINITO
+        tempo_servico = np.random.randint(300)
+        pedagio = 0
+        tempo_na_lotacao = 0
+        tempo_fora = 0
+        if lotacao == 'P0':  # Ele está no Brasil
+            pedagio = np.random.randint(30)
+            tempo_na_lotacao = 0
+            tempo_fora = 0
+        else:
+            pedagio = 0
+            tempo_na_lotacao = np.random.randint(25)
+            tempo_fora = tempo_na_lotacao + np.random.randint(97, 122)
 
-    if diplomata.lotacao != 'P0':
-        posto_trabalho_atual = get_posto_trabalho(diplomata.lotacao, postos)
-        if (
-                posto_trabalho_atual and
-                diplomata.lotacao != posto.posto and
-                posto.classificacao == 'A' and
-                posto_trabalho_atual.get('classificacao') == 'A'
-        ):
+        ids.append('D' + str(p + 1))
+        pedagios.append(pedagio)
+        lotacoes.append(lotacao)
+        tempos_servico.append(tempo_servico)
+        tempos_lotacao.append(tempo_na_lotacao)
+        tempos_fora.append(tempo_fora)
+
+    d = {
+        'id': ids,
+        'pedagio': pedagios,
+        'lotacao': lotacoes,
+        'tempo_servico': tempos_servico,
+        'tempo_na_lotacao': tempos_lotacao,
+        'tempo_fora': tempos_fora
+    }
+    return pd.DataFrame(data=d)
+
+
+def gerar_base_postos(qtd_postos):
+    postos = ['P0']
+    classificacoes = ['*']
+    tipos_classificacoes = ['A', 'B', 'C', 'D']
+
+    for p in range(qtd_postos):
+        posto = 'P' + str(p + 1)
+        postos.append(posto)
+        classificacoes.append(tipos_classificacoes[np.random.randint(4)])
+
+    d = {
+        'posto': postos,
+        'classificacao': classificacoes
+    }
+
+    return pd.DataFrame(data=d)
+
+
+# Função de custo compartilhada
+def calcular_custo_aresta(diplomata, posto, cidades):
+    CUSTO_INFINITO = 999999999.99
+    if diplomata.tempo_fora >= 144:
+        if posto.classificacao == '*':
+            return 0.0
+        else:
             return CUSTO_INFINITO
-    elif diplomata.pedagio < TEMPO_MINIMO_PEDAGIO and posto.classificacao == 'A':
+
+    if diplomata.tempo_na_lotacao >= 24 and diplomata.lotacao == posto.posto:
         return CUSTO_INFINITO
 
-    return classificacao_para_custo(posto.classificacao)
+    if posto.classificacao == 'A':
+        return 1.0
+    if posto.classificacao == 'B':
+        return 2.0
+    if posto.classificacao == 'C':
+        return 3.0
+    if posto.classificacao == 'D':
+        return 4.0
 
-def alocar_diplomatas_pli(diplomatas, postos):
+    return CUSTO_INFINITO
+
+
+# Função para calcular pesos (custos)
+def calcular_custos_arestas(diplomatas, cidades):
+    pesos_arestas = []
+    for _, diplomata in diplomatas.iterrows():
+        pesos_diplomata = []
+        for _, posto in cidades.iterrows():
+            pesos_diplomata.append(calcular_custo_aresta(diplomata, posto, cidades))
+        pesos_arestas.append(pesos_diplomata)
+    return pesos_arestas
+
+
+# Algoritmo Húngaro
+def rodar_hungaro(diplomatas, postos):
+    pesos_arestas = calcular_custos_arestas(diplomatas, postos)
+    matriz_custos = np.array(pesos_arestas)
+    linhas, colunas = linear_sum_assignment(matriz_custos)
+    custo_total = matriz_custos[linhas, colunas].sum()
+    tempo_execucao = time.time()
+    return linhas, colunas, custo_total, tempo_execucao
+
+
+# Algoritmo PLI
+def rodar_pli(diplomatas, postos, num_diplomatas, num_postos):
     problema = pl.LpProblem("Alocacao_Diplomatas", pl.LpMinimize)
     variaveis = {}
-    for i, diplomata in diplomatas.iterrows():
-        for j, posto in postos.iterrows():
+    for i in range(num_diplomatas):
+        for j in range(num_postos):
             variaveis[(i, j)] = pl.LpVariable(f"x_{i}_{j}", cat="Binary")
 
+    # Objetivo
     problema += pl.lpSum(
         variaveis[(i, j)] * calcular_custo_aresta(diplomatas.iloc[i], postos.iloc[j], postos)
-        for i in range(len(diplomatas)) for j in range(len(postos))
+        for i in range(num_diplomatas)
+        for j in range(num_postos)
     )
 
-    for i in range(len(diplomatas)):
-        problema += pl.lpSum(variaveis[(i, j)] for j in range(len(postos))) == 1
+    # Restrições
+    for i in range(num_diplomatas):
+        problema += pl.lpSum(variaveis[(i, j)] for j in range(num_postos)) == 1
 
-    for j in range(len(postos)):
-        problema += pl.lpSum(variaveis[(i, j)] for i in range(len(diplomatas))) <= 1
+    for j in range(num_postos):
+        problema += pl.lpSum(variaveis[(i, j)] for i in range(num_diplomatas)) <= 1
 
     problema.solve()
 
     alocacoes = [
-        (i, j) for i in range(len(diplomatas)) for j in range(len(postos))
+        (i, j) for i in range(num_diplomatas) for j in range(num_postos)
         if pl.value(variaveis[(i, j)]) == 1
     ]
     custo_total = pl.value(problema.objective)
+    tempo_execucao = time.time()
 
-    return alocacoes, custo_total
+    return alocacoes, custo_total, tempo_execucao
 
-def executar_pli(caminho_json, num_diplomatas):
-    df_postos = carregar_postos(caminho_json)
-    diplomatas = gerar_base_diplomatas(num_diplomatas, len(df_postos))
-    postos = df_postos
+
+# Teste comparativo
+def comparar_algoritmos(qtd_diplomatas, qtd_postos):
+    # Gerar dados
+    diplomatas = gerar_base_diplomatas(qtd_diplomatas, qtd_postos)
+    postos = gerar_base_postos(qtd_postos)
+
+    # Rodar cada algoritmo
+    inicio = time.time()
+    linhas_h, colunas_h, custo_h, tempo_h = rodar_hungaro(diplomatas, postos)
+    fim_h = time.time()
+    tempo_h = fim_h - inicio
 
     inicio = time.time()
-    alocacoes, custo_total = alocar_diplomatas_pli(diplomatas, postos)
-    fim = time.time()
+    alocacoes_p, custo_p, tempo_p = rodar_pli(diplomatas, postos, qtd_diplomatas, qtd_postos)
+    fim_p = time.time()
+    tempo_p = fim_p - inicio
 
-    tempo_execucao = fim - inicio
+    # Resultados finais
+    df_resultados = pd.DataFrame({
+        "Algoritmo": ["Húngaro", "PLI"],
+        "Custo Total": [custo_h, custo_p],
+        "Tempo de Execução (s)": [tempo_h, tempo_p]
+    })
 
-    resultados = pd.DataFrame([
-        {"Diplomata": diplomatas.iloc[i].id, "Posto": postos.iloc[j].posto}
-        for i, j in alocacoes
-    ])
-
-    return resultados, custo_total, tempo_execucao, diplomatas, postos, alocacoes
+    return df_resultados
 
 
-# 2. Construir matriz de custos - Mapa de Calor
-# matriz_custos = np.zeros((len(diplomatas), len(postos)))
-# for i in range(len(diplomatas)):
-#     for j in range(len(postos)):
-#         matriz_custos[i, j] = calcular_custo_aresta(diplomatas.iloc[i], postos.iloc[j], postos)
-
-# 3. Plotar heatmap
-# plt.figure(figsize=(10, 8))
-# sns.heatmap(matriz_custos, cmap="YlGnBu", annot=False)
-# plt.title("Mapa de Calor dos Custos de Alocação")
-# plt.xlabel("Postos")
-# plt.ylabel("Diplomatas")
-# plt.show()
-
-# 3. Gráfico de Barras
-# diplomata_ids = [diplomatas.iloc[i].id for i, j in alocacoes]
-#
-# plt.figure(figsize=(12, 6))
-# plt.bar(diplomata_ids, alocacao_custos)
-# plt.title("Custo de Alocação por Diplomata")
-# plt.xlabel("Diplomata ID")
-# plt.ylabel("Custo")
-# plt.show()
-
-# 5. Criar grafo - Gráfico de Rede
-def criar_grafo_rede(diplomatas, postos, alocacoes):
-    G = nx.DiGraph()
-    for i, j in alocacoes:
-        diplomata = diplomatas.iloc[i]
-        posto = postos.iloc[j]
-        custo = calcular_custo_aresta(diplomata, posto, postos)
-        G.add_edge(f"Diplomata {diplomata.id}", f"Posto {posto.posto}", weight=custo)
-
-    # Desenhar grafo
-    pos = nx.spring_layout(G)  # Experimente circular_layout ou kamada_kawai_layout
-    plt.figure(figsize=(16, 16))  # Aumentar tamanho da figura para caber mais informações
-    nx.draw(
-        G,
-        pos,
-        with_labels=True,
-        node_size=300,         # Tamanho reduzido dos nós
-        font_size=4,           # Fonte menor
-        width=0.5,             # Linhas mais finas
-        edge_color='gray',     # Cor cinza para as linhas
-        alpha=0.7              # Transparência para reduzir poluição visual
-    )
-    edge_labels = nx.get_edge_attributes(G, 'weight')
-    nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_size=5)  # Fonte menor para pesos
-    plt.title("Grafo de Alocação", fontsize=12)
-    plt.show()
-
-caminho_json = "resources/postos.json"
-#caminho_json = "/Users/andersoncaxeta/IdeaProjects/AEDI/resources/postos.json"
-num_diplomatas = 350
-
-resultados, custo_total, tempo_execucao, diplomatas, postos, alocacoes = executar_pli(caminho_json, num_diplomatas)
-
-# Mostrar resultados
-print("Alocações (diplomata -> posto):")
+# Exemplo de uso
+qtd_diplomatas = 350
+qtd_postos = 227
+resultados = comparar_algoritmos(qtd_diplomatas, qtd_postos)
 print(resultados)
-print("Custo total:", custo_total)
-print("Tempo de execução:", tempo_execucao)
 
-# Criar e mostrar o gráfico de rede
-criar_grafo_rede(diplomatas, postos, alocacoes)
 
-# 6.Interface Gráfica com Streamlit
-# st.title("Resultados da Alocação de Diplomatas")
-# st.write(resultados)
-#
-# # Adicionar gráfico interativo
-# st.bar_chart(alocacao_custos)
+# Função para calcular médias por classificação
+import pandas as pd
+
+def calcular_classificacao_pli(diplomatas, postos, alocacoes):
+    resultados = {
+        "classificacao_anterior": [],
+        "tempo_servico": [],
+        "tempo_na_lotacao": [],
+        "tempo_fora": [],
+        "tempo_sede": [],
+        "classificacao_alocada": []
+    }
+
+    for alocacao in alocacoes:
+        id_diplomata, id_posto = alocacao
+
+        diplomata = diplomatas.iloc[id_diplomata]
+        posto = postos.iloc[id_posto]
+
+        try:
+            classificacao_anterior = diplomata["classificacao"] if "classificacao" in diplomata else "*"
+            tempo_servico = float(diplomata["tempo_servico"])
+            tempo_na_lotacao = float(diplomata["tempo_na_lotacao"])
+            tempo_fora = float(diplomata["tempo_fora"])
+            tempo_sede = float(diplomata["pedagio"])
+            classificacao_alocada = posto["classificacao"]
+        except (ValueError, KeyError, TypeError):
+            continue
+
+        resultados["classificacao_anterior"].append(classificacao_anterior)
+        resultados["tempo_servico"].append(tempo_servico)
+        resultados["tempo_na_lotacao"].append(tempo_na_lotacao)
+        resultados["tempo_fora"].append(tempo_fora)
+        resultados["tempo_sede"].append(tempo_sede)
+        resultados["classificacao_alocada"].append(classificacao_alocada)
+
+    df_resultados = pd.DataFrame(resultados)
+
+    # Agrupando e calculando as médias, ignorando valores inválidos
+    estatisticas_anteriores = df_resultados.groupby("classificacao_anterior").mean(numeric_only=True)
+    estatisticas_alocadas = df_resultados.groupby("classificacao_alocada").mean(numeric_only=True)
+
+    return estatisticas_anteriores, estatisticas_alocadas
+
+# Exemplo de uso
+# Supor que `alocacoes` foi obtido do PLI e contém pares (id_diplomata, id_posto)
+diplomatas = gerar_base_diplomatas(qtd_diplomatas, qtd_postos)
+postos = gerar_base_postos(qtd_postos)
+alocacoes, custo_total, tempo_execucao = rodar_pli(diplomatas, postos, qtd_diplomatas, qtd_postos)
+
+estatisticas_anteriores, estatisticas_alocadas = calcular_classificacao_pli(diplomatas, postos, alocacoes)
+
+print("Estatísticas antes da realocação:")
+print(estatisticas_anteriores)
+
+print("Estatísticas após a realocação:")
+print(estatisticas_alocadas)
+
+
+
+
+import pandas as pd
+
+def comparar_algoritmos(estatisticas_hungaro_anteriores, estatisticas_hungaro_alocadas, estatisticas_pli_anteriores, estatisticas_pli_alocadas):
+    comparativo = {
+        "Classificação": [],
+        "Média Tempo Serviço (Húngaro Antes)": [],
+        "Média Tempo Serviço (Húngaro Depois)": [],
+        "Média Tempo Serviço (PLI Antes)": [],
+        "Média Tempo Serviço (PLI Depois)": []
+    }
+
+    classificacoes = set(estatisticas_hungaro_anteriores.index).union(estatisticas_pli_anteriores.index)
+
+    for classificacao in classificacoes:
+        comparativo["Classificação"].append(classificacao)
+        comparativo["Média Tempo Serviço (Húngaro Antes)"].append(
+            estatisticas_hungaro_anteriores.get("tempo_servico", {}).get(classificacao, None)
+        )
+        comparativo["Média Tempo Serviço (Húngaro Depois)"].append(
+            estatisticas_hungaro_alocadas.get("tempo_servico", {}).get(classificacao, None)
+        )
+        comparativo["Média Tempo Serviço (PLI Antes)"].append(
+            estatisticas_pli_anteriores.get("tempo_servico", {}).get(classificacao, None)
+        )
+        comparativo["Média Tempo Serviço (PLI Depois)"].append(
+            estatisticas_pli_alocadas.get("tempo_servico", {}).get(classificacao, None)
+        )
+
+    df_comparativo = pd.DataFrame(comparativo)
+    return df_comparativo
+
+# Ajuste na chamada da função rodar_hungaro
+linhas_h, colunas_h, _, _ = rodar_hungaro(diplomatas, postos)
+alocacoes_hungaro = list(zip(linhas_h, colunas_h))
+
+estatisticas_hungaro_anteriores, estatisticas_hungaro_alocadas = calcular_classificacao_pli(diplomatas, postos, alocacoes_hungaro)
+
+# Comparar os dois algoritmos
+comparativo = comparar_algoritmos(estatisticas_hungaro_anteriores, estatisticas_hungaro_alocadas,
+                                  estatisticas_anteriores, estatisticas_alocadas)
+
+# Exibir o resultado completo
+print("Comparação entre os Algoritmos Húngaro e PLI:")
+print(comparativo.to_string(index=False))
+
+distribuicao_antes = estatisticas_anteriores['tempo_servico'].count()
+distribuicao_depois = estatisticas_alocadas['tempo_servico'].count()
+
+print("Distribuição antes da realocação:")
+print(distribuicao_antes)
+print("Distribuição após a realocação:")
+print(distribuicao_depois)
+
+
+custo_medio_antes = estatisticas_anteriores['tempo_servico'].mean()
+custo_medio_depois = estatisticas_alocadas['tempo_servico'].mean()
+
+print("Custo médio por classificação antes:")
+print(custo_medio_antes)
+print("Custo médio por classificação após:")
+print(custo_medio_depois)
+
+desvio_antes = estatisticas_anteriores[['tempo_servico', 'tempo_na_lotacao', 'tempo_fora']].std()
+desvio_depois = estatisticas_alocadas[['tempo_servico', 'tempo_na_lotacao', 'tempo_fora']].std()
+
+print("Desvio padrão antes:")
+print(desvio_antes)
+print("Desvio padrão após:")
+print(desvio_depois)
+
+# Ordenar e redefinir os índices dos diplomatas e postos
+diplomatas_sorted = diplomatas.sort_values(by='id').reset_index(drop=True)
+postos_sorted = postos.sort_values(by='posto').reset_index(drop=True)
+
